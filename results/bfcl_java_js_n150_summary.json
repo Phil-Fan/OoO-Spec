@@ -1,0 +1,34 @@
+{
+  "n": 150,
+  "vanilla": {
+    "avg_time": 1.4266295083363851,
+    "avg_new_tokens": 41.38666666666666,
+    "name_acc": 0.9933333333333333,
+    "params_exact_acc": 0.9933333333333333
+  },
+  "toolspec": {
+    "avg_time": 0.5457798480987549,
+    "avg_new_tokens": 41.45333333333333,
+    "avg_steps": 11.433333333333334,
+    "avg_mean_accept": 3.6830137672732453,
+    "name_acc": 0.9866666666666667,
+    "params_exact_acc": 0.9133333333333333
+  },
+  "ooospec": {
+    "avg_time": 0.43222781976064045,
+    "avg_total_time": 0.43222781976064045,
+    "avg_sidecar_time": 0.22732656002044677,
+    "avg_sidecar_wait": 0.0,
+    "avg_new_tokens": 41.166666666666664,
+    "avg_steps": 8.386666666666667,
+    "avg_mean_accept": 11.704004109174166,
+    "name_acc": 0.9866666666666667,
+    "params_exact_acc": 0.9133333333333333
+  },
+  "speedups": {
+    "toolspec_vs_vanilla": 2.613928515877059,
+    "ooospec_target_vs_vanilla": 3.300642492485619,
+    "ooospec_total_vs_vanilla": 3.300642492485619,
+    "ooospec_vs_toolspec": 1.262713372778729
+  }
+}

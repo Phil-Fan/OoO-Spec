@@ -1,0 +1,30 @@
+{
+  "metrics": {
+    "function_index_accuracy": 0.9631067961165048,
+    "argument_exact_match": 0.8614259597806215,
+    "null_precision": 0.9563132658497603,
+    "null_recall": 0.9681769147788565,
+    "direct_call_exact_match": 0.541747572815534,
+    "direct_call_name_accuracy": 0.9553398058252427,
+    "direct_call_argument_f1": 0.6571752196024039
+  },
+  "counts": {
+    "function_index": {
+      "n": 515,
+      "correct": 496
+    },
+    "argument_value": {
+      "n": 2735,
+      "correct": 2356,
+      "null_tp": 1795,
+      "null_pred": 1877,
+      "null_gold": 1854
+    },
+    "direct_call": {
+      "n": 515,
+      "exact": 279,
+      "name_correct": 492,
+      "arg_f1_sum": 338.445238095238
+    }
+  }
+}

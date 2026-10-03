@@ -1,0 +1,34 @@
+# OoO-Spec reproduction dependencies
+#
+# The online system is designed to run as two processes on two GPUs:
+#   * target / ToolSpec side  -> torch==2.5.1, transformers==4.51.1
+#   * sidecar side            -> vLLM (OpenAI-compatible API)
+# Using two virtual environments is recommended; the pins below work for both
+# the offline pipeline and the target side. See src/toolspec/requirements.txt
+# for the exact upstream ToolSpec pins.
+
+# --- Core ---
+torch==2.5.1
+transformers==4.51.1
+accelerate==1.13.0
+peft>=0.20.0
+datasets==3.4.1
+huggingface_hub>=0.30
+sentencepiece==0.2.0
+protobuf>=3.19.0
+
+# --- Utilities used across the pipeline ---
+numpy
+pandas
+tqdm
+requests
+httpx
+shortuuid
+
+# --- Optional: upstream ToolSpec extras (only needed for some backends) ---
+fschat==0.2.31
+openai==0.28.0
+
+# --- Sidecar serving ---
+# Install in the sidecar environment. Version depends on your CUDA/torch stack.
+vllm

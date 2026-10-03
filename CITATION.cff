@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this reproduction, please cite the original OoO-Spec paper."
+title: "OoO-Spec: Out-of-Order Semantic Speculation for Fast Tool Calling (independent reproduction)"
+abstract: >-
+  Independent, from-scratch reproduction of the OoO-Spec method: a frozen
+  Qwen3-0.6B + LoRA sidecar that predicts tool-call function and argument slots
+  out of order, integrated asynchronously with a ToolSpec target decoding loop.
+  This repository is not the authors' official implementation.
+type: software
+authors:
+  - family-names: Fan
+    given-names: Phil
+license: Apache-2.0
+keywords:
+  - speculative decoding
+  - tool calling
+  - function calling
+  - LLM inference
+  - reproduction
+preferred-citation:
+  type: article
+  title: "OoO-Spec: Out-of-Order Semantic Speculation for Fast Tool Calling"
+  authors:
+    - family-names: Zhang
+      given-names: Zhiheng
+    - family-names: Xu
+      given-names: Mujie
+    - family-names: Sun
+      given-names: Feiyu
+    - family-names: Zhang
+      given-names: Zhixin
+  year: 2026
+  journal: "arXiv preprint"
+  url: "https://arxiv.org/abs/2608.00814"
+  doi: "10.48550/arXiv.2608.00814"

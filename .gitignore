@@ -1,0 +1,37 @@
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local environments
+.venv/
+venv/
+
+# Secrets and local config
+.env
+.env.*
+*.key
+
+# Logs and OS noise
+*.log
+.DS_Store
+
+# Generated outputs and model artifacts
+output/
+outputs/
+
+# Downloaded/raw datasets and generated training data
+data/downloads/
+data/raw/
+data/evalsets/
+data/train/
+
+# Internal notes and reproduction plan (not for public release)
+notion_report.md
+plan/
+# unpublished paper source; keep private until publication
+thesis/
+
+# Keep data documentation and downloader tracked
+!data/
+!data/README.md
+!data/download_datasets.py

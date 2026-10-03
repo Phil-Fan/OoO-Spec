@@ -1,0 +1,22 @@
+OoO-Spec reproduction
+Copyright 2026 Phil-Fan
+
+This product is an independent reproduction of the OoO-Spec method and is not
+the official implementation released by the paper's authors.
+
+This product includes software developed by third parties:
+
+1. ToolSpec
+   The directory src/toolspec/ is vendored from the upstream project
+   https://github.com/hemingkx/ToolSpec (pinned around commit 69335b9), and is
+   used here for its schema-FSM, candidate-tree, retrieval and KV-cache
+   decoding modules.
+   Copyright Heming Xia, Yongqi Li, Cunxiao Du, Mingbo Song, Wenjie Li.
+   Licensed under the Apache License, Version 2.0.
+   See src/toolspec/LICENSE and src/toolspec/PROVENANCE.md.
+
+Datasets, model weights, and model outputs that this repository downloads or
+generates are governed by their own upstream licenses and terms and are not
+redistributed in this repository. This includes, but is not limited to, the
+API-Bank, ToolAlpaca, BFCL, Mobile Actions, SealTools and OpenFunctions
+datasets, and the Qwen2.5 and Qwen3 model families.
