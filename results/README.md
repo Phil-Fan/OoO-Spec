@@ -61,4 +61,6 @@ dataset text, and no internal ablation experiments.
 
 The aggregation scripts live in `src/inference/` (e.g.
 `run_all_benchmarks_eval.py`). Data and model weights are not committed; build
-them from `data/download_datasets.py` and `src/training/train_sidecar_lora.py`.
+them from `data/download_datasets.py` and `src/training/train_sidecar_lora.py`,
+or use the released adapter at
+[`ArisrrrX/OoO-Spec-sidecar-lora`](https://huggingface.co/ArisrrrX/OoO-Spec-sidecar-lora).

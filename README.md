@@ -18,8 +18,9 @@
 - ✅ Qwen3-0.6B + LoRA sidecar training
 - ✅ Split-GPU asynchronous inference loop on top of ToolSpec
 - 📊 Aggregate metrics are published under [`results/`](results/).
-  Per-request outputs, raw datasets, model weights, and internal ablations are
-  not committed.
+- 🤗 Pretrained sidecar LoRA adapters are on the Hugging Face Hub:
+  [`ArisrrrX/OoO-Spec-sidecar-lora`](https://huggingface.co/ArisrrrX/OoO-Spec-sidecar-lora).
+- Per-request outputs, raw datasets, and internal ablations are not committed.
 
 If you use this reproduction, please cite the original paper (see
 [Citation](#citation)) and note that the numbers you obtain come from an
@@ -55,6 +56,33 @@ textual order. The target model runs a native **ToolSpec** decoding loop and,
 without ever blocking, joins the sidecar's rendered semantic hint at recurring
 candidate-construction boundaries. The target remains the only verifier and
 commit authority. One sidecar is reused across target sizes and families.
+
+## Pretrained sidecar weights
+
+The sidecar adapters behind the published [`results/`](results/) are on the
+Hugging Face Hub:
+
+**→ [ArisrrrX/OoO-Spec-sidecar-lora](https://huggingface.co/ArisrrrX/OoO-Spec-sidecar-lora)** (Apache-2.0)
+
+| Subfolder | Notes |
+|---|---|
+| `sidecar-lora-spaced/` | Used for the metrics in `results/`. |
+| `sidecar-lora/` | Default adapter path used by the inference scripts. |
+
+```python
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+base = "Qwen/Qwen3-0.6B"
+repo = "ArisrrrX/OoO-Spec-sidecar-lora"
+
+tok = AutoTokenizer.from_pretrained(base, trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained(base, torch_dtype="bfloat16", device_map="auto")
+model = PeftModel.from_pretrained(model, repo, subfolder="sidecar-lora-spaced").eval()
+```
+
+To reproduce the data and retrain the adapter from scratch instead, follow the
+[Pipeline](#pipeline).
 
 ## Requirements
 
@@ -157,6 +185,9 @@ LoRA `r=32, alpha=64, dropout=0.05`; 1 epoch; effective batch 32; cosine LR
 `1e-4`; prompt labels masked. The adapter is written to
 `outputs/sidecar-lora/final`.
 
+If you do not want to train, download the released adapter instead — see
+[Pretrained sidecar weights](#pretrained-sidecar-weights).
+
 ### 6. Convert evaluation benchmarks (optional)
 
 Each converter writes a unified `src_requests` JSONL:
@@ -189,7 +220,9 @@ python -m vllm.entrypoints.openai.api_server \
 ```
 
 The inference scripts send requests to `http://localhost:7892/v1/completions`
-by default.
+by default. The `--lora-modules` path can point at a local adapter; to use the
+released one, download it first, e.g.
+`hf download ArisrrrX/OoO-Spec-sidecar-lora --include 'sidecar-lora-spaced/*' --local-dir outputs/sidecar-lora-spaced`.
 
 ### 8. Run evaluations
 
