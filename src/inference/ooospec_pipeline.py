@@ -10,9 +10,11 @@ hint injected into its retrieval tree.
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -29,10 +31,14 @@ sys.path.insert(0, str(TOOLSPECT_ROOT))
 from preprocessing.expand_semantic_rows import (  # noqa: E402
     SYSTEM_INSTRUCTION as SIDECAR_SYSTEM,
     format_schemas_with_indices,
+    format_schemas_with_param_tags,
 )
 from evaluation.inference_toolspec import toolspec_forward  # noqa: E402
 from model.toolspec.modeling_qwen_kv import Qwen2ForCausalLM  # noqa: E402
 from model.toolspec.schema_fsm import SchemaFSM  # noqa: E402
+
+# Persistent HTTP session: reuse the connection to the sidecar service.
+_HTTP_SESSION = requests.Session()
 
 
 def get_paths():
@@ -190,6 +196,181 @@ def parse_sidecar_output(text: str):
 
 SIDECAR_API_URL = "http://localhost:7892/v1/completions"
 
+# Trailing instruction present in the source requests; stripped before building
+# the sidecar prompts (matches the offline training rows).
+SIDECAR_TAIL = (
+    "\n\n<user> Based on our conversation above, please only make one tool call "
+    "to solve my need.</user>"
+)
+
+
+def _sidecar_chat(sidecar_tok, user_text: str) -> str:
+    return sidecar_tok.apply_chat_template(
+        [
+            {"role": "system", "content": SIDECAR_SYSTEM},
+            {"role": "user", "content": user_text},
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+
+def build_sidecar_slot_prompts(sidecar_tok, src_row: dict):
+    """Paper-style online queries: one function-index prompt plus one prompt per
+    (candidate function, parameter) slot.
+
+    Returns ``(fn_prompt, [(f_idx, p_name, prompt), ...])``.
+    """
+    schemas = src_row.get("schemas", [])
+    dialogue = src_row.get("user", "").replace(SIDECAR_TAIL, "")
+    fn_user = (
+        f"{dialogue}\n\nAvailable tools:\n"
+        f"{format_schemas_with_indices(schemas)}\n\n"
+        "Which tool should be called? Respond with only the index number."
+    )
+    fn_prompt = _sidecar_chat(sidecar_tok, fn_user)
+
+    arg_prompts = []
+    param_tags = format_schemas_with_param_tags(schemas)
+    for f_idx, s in enumerate(schemas):
+        for p_name in (s.get("parameters") or {}):
+            user = (
+                f"{dialogue}\n\nAvailable tool parameters:\n{param_tags}\n\n"
+                f"What is the value for parameter '{p_name}' of tool [{f_idx}] {s['name']}? "
+                "Respond with a compact JSON value, or the literal string null if not applicable."
+            )
+            arg_prompts.append((f_idx, p_name, _sidecar_chat(sidecar_tok, user)))
+    return fn_prompt, arg_prompts
+
+
+def _parse_int_index(text: str, n_tools: int):
+    match = re.search(r"-?\d+", text or "")
+    if not match:
+        return None
+    index = int(match.group())
+    return index if 0 <= index < n_tools else None
+
+
+def _parse_json_value(text: str):
+    """Return ``(value, ok)`` for a compact JSON value or the literal ``null``."""
+    text = (text or "").strip()
+    if not text:
+        return None, False
+    if text.lower().startswith("null"):
+        return None, True
+    start = None
+    for ch in ('"', "{", "["):
+        pos = text.find(ch)
+        if pos != -1 and (start is None or pos < start):
+            start = pos
+    if start is None:
+        match = re.match(r"-?\d+(?:\.\d+)?|true|false", text)
+        if not match:
+            return None, False
+        try:
+            return json.loads(match.group()), True
+        except json.JSONDecodeError:
+            return None, False
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text[start:])
+        return value, True
+    except json.JSONDecodeError:
+        return None, False
+
+
+def _join_normalized_call(schemas, fn_idx, arg_values):
+    if not isinstance(fn_idx, int) or not (0 <= fn_idx < len(schemas)):
+        return None
+    params = {k: v for k, v in (arg_values or {}).items() if v is not None}
+    return {"name": schemas[fn_idx]["name"], "parameters": params}
+
+
+def _render_hint_text(call):
+    if not call:
+        return None
+    return json.dumps(call, ensure_ascii=False, separators=(", ", ": "))
+
+
+class SidecarHintFuture:
+    """Within-request asynchronous sidecar job (paper-style parallel slot wave).
+
+    The job is launched at request arrival and the target polls it
+    non-blockingly at candidate-construction boundaries (``poll()``). The
+    sidecar wall time is exposed via ``elapsed``; the target never waits.
+    """
+
+    def __init__(self, sidecar_tok, src_row, api_url=SIDECAR_API_URL, max_workers=16):
+        self._ready = threading.Event()
+        self._text = None
+        self._elapsed = 0.0
+        self._exc = None
+        self._consumed = False
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(sidecar_tok, src_row, api_url, max_workers),
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _post(self, prompt: str) -> str:
+        resp = _HTTP_SESSION.post(
+            self.api_url,
+            json={"model": "sidecar", "prompt": prompt, "max_tokens": 32, "temperature": 0},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["text"]
+
+    def _run(self, sidecar_tok, src_row, api_url, max_workers):
+        self.api_url = api_url
+        try:
+            start = time.time()
+            schemas = src_row.get("schemas", [])
+            fn_prompt, arg_prompts = build_sidecar_slot_prompts(sidecar_tok, src_row)
+            prompts = [fn_prompt] + [prompt for _, _, prompt in arg_prompts]
+            texts = [""] * len(prompts)
+            with ThreadPoolExecutor(max_workers=min(max_workers, len(prompts))) as executor:
+                futures = {executor.submit(self._post, p): i for i, p in enumerate(prompts)}
+                for future in as_completed(futures):
+                    texts[futures[future]] = future.result()
+
+            fn_idx = _parse_int_index(texts[0], len(schemas))
+            arg_values = {}
+            if fn_idx is not None:
+                for (f_idx, p_name, _), text in zip(arg_prompts, texts[1:]):
+                    if f_idx != fn_idx:
+                        continue
+                    value, ok = _parse_json_value(text)
+                    if ok and value is not None:
+                        arg_values[p_name] = value
+            call = _join_normalized_call(schemas, fn_idx, arg_values)
+            self._text = _render_hint_text(call)
+            self._elapsed = time.time() - start
+        except Exception as exc:  # noqa: BLE001
+            self._exc = exc
+        finally:
+            self._ready.set()
+
+    def poll(self):
+        """Non-blocking pickup; returns ``(text, elapsed)`` once, else ``None``."""
+        if not self._ready.is_set() or self._consumed:
+            return None
+        self._consumed = True
+        if self._exc is not None:
+            return None
+        return (self._text, self._elapsed)
+
+    @property
+    def elapsed(self) -> float:
+        return self._elapsed
+
+    def wait(self, timeout=None):
+        self._ready.wait(timeout)
+        if self._exc is not None:
+            raise self._exc
+        return (self._text, self._elapsed)
+
 
 def load_sidecar_tokenizer(base_path: str):
     print(f"[Sidecar] loading tokenizer {base_path}")
@@ -263,21 +444,37 @@ def run_toolspec_sample(
     max_new_tokens: int = 256,
     use_hint: bool = True,
     prefetched_hint: tuple | None = None,
+    output_memory: list | None = None,
+    sidecar_future: "SidecarHintFuture | None" = None,
+    slot_mode: bool = False,
 ):
     sidecar_time = 0.0
     raw_hint = ""
     formatted_hint = None
     hint_tokens = None
+    provider = None
 
     if use_hint:
-        if prefetched_hint is not None:
+        if sidecar_future is not None:
+            provider = sidecar_future
+        elif slot_mode:
+            # Within-request async: launch the parallel slot wave now, let the
+            # target poll it non-blockingly while it decodes.
+            provider = SidecarHintFuture(sidecar_tok, src_row)
+        elif prefetched_hint is not None:
             raw_hint, sidecar_time = prefetched_hint
+            formatted_hint = parse_sidecar_output(raw_hint)
+            if formatted_hint is not None:
+                hint_tokens = torch.tensor(
+                    target_tok.encode(formatted_hint, add_special_tokens=False), dtype=torch.long
+                )
         else:
             raw_hint, sidecar_time = generate_sidecar_hint(sidecar_tok, src_row)
-        formatted_hint = parse_sidecar_output(raw_hint)
-        if formatted_hint is not None:
-            hint_tokens = target_tok.encode(formatted_hint, add_special_tokens=False)
-            hint_tokens = torch.tensor(hint_tokens, dtype=torch.long)
+            formatted_hint = parse_sidecar_output(raw_hint)
+            if formatted_hint is not None:
+                hint_tokens = torch.tensor(
+                    target_tok.encode(formatted_hint, add_special_tokens=False), dtype=torch.long
+                )
 
     messages = src_row["messages"]
     system = src_row["system"]
@@ -291,9 +488,9 @@ def run_toolspec_sample(
 
     torch.cuda.synchronize(target_model.device)
     start = time.time()
-    output_ids, new_token, step, accept_lengths, _ = toolspec_forward(
+    output_ids, new_token, step, accept_lengths, question_hidden_state = toolspec_forward(
         inputs,
-        [],
+        output_memory if output_memory is not None else [],
         schema_fsm,
         target_model,
         target_tok,
@@ -301,10 +498,32 @@ def run_toolspec_sample(
         output_id_topk=8,
         adj_matrix=adj_matrix,
         sidecar_hint=hint_tokens,
+        sidecar_hint_provider=provider,
     )
     torch.cuda.synchronize(target_model.device)
     wall_time = time.time() - start
     output_text = decode_target_output(target_tok, output_ids, len(inputs["input_ids"][0]))
+
+    if provider is not None:
+        # Measurement only: make sure the sidecar wall time is captured even if
+        # the target finished before consuming the hint. Target wall_time was
+        # already recorded above, so this does not affect it.
+        try:
+            provider.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
+        sidecar_time = provider.elapsed
+    sidecar_wait = 0.0  # non-blocking pickup; the target never waits for a hint
+
+    if output_memory is not None:
+        gen_ids = output_ids[0, len(inputs["input_ids"][0]):]
+        output_memory.append(
+            {
+                "question_id": src_row.get("request_id"),
+                "question_hidden_state": question_hidden_state,
+                "output_ids": gen_ids.tolist(),
+            }
+        )
 
     return {
         "request_id": src_row.get("request_id"),
@@ -316,6 +535,7 @@ def run_toolspec_sample(
         "mean_accept": float(sum(accept_lengths) / len(accept_lengths)) if accept_lengths else 0.0,
         "wall_time": wall_time,
         "sidecar_time": sidecar_time,
+        "sidecar_wait": sidecar_wait,
     }
 
 

@@ -21,7 +21,7 @@ sys.path.insert(0, str(SRC_ROOT / "toolspec"))
 
 from inference.ooospec_pipeline import (  # noqa: E402
     SIDECAR_API_URL,
-    SidecarPrefetcher,
+    SidecarHintFuture,
     build_sidecar_prompt_text,
     decode_target_output,
     get_paths,
@@ -82,7 +82,6 @@ def run_one_dataset(
     target_model,
     target_tok,
     vanilla_model,
-    prefetcher,
 ):
     output_dir.mkdir(parents=True, exist_ok=True)
     result_path = output_dir / "results.jsonl"
@@ -109,27 +108,16 @@ def run_one_dataset(
 
     src_rows = [r for r in src_rows if r.get("request_id") not in processed_ids]
 
+    mem_toolspec = []
+    mem_ooospec = []
     try:
-        if src_rows:
-            first_row = src_rows[0]
-            prefetcher.submit(
-                first_row.get("request_id"),
-                build_sidecar_prompt_text(sidecar_tok, first_row),
-            )
-
         pbar = tqdm(src_rows, desc=f"Eval {output_dir.name}", initial=len(records), total=len(src_rows) + len(records))
         for i, src_row in enumerate(pbar):
             request_id = src_row.get("request_id")
 
-            raw_hint, sidecar_time = prefetcher.get(request_id)
-            sidecar_wait = 0.0
-
-            if i + 1 < len(src_rows):
-                next_row = src_rows[i + 1]
-                prefetcher.submit(
-                    next_row.get("request_id"),
-                    build_sidecar_prompt_text(sidecar_tok, next_row),
-                )
+            # Launch the asynchronous sidecar job at request arrival; the target
+            # polls it non-blockingly during decoding (paper-style).
+            sidecar_future = SidecarHintFuture(sidecar_tok, src_row)
 
             vanilla_res = run_vanilla_sample(src_row, vanilla_model, target_tok)
             gold = src_row.get("answer") if has_gold else vanilla_res["target_output"]
@@ -141,6 +129,7 @@ def run_one_dataset(
                 target_tok,
                 adj_matrix_baseline,
                 use_hint=False,
+                output_memory=mem_toolspec,
             )
             ooospec_res = run_toolspec_sample(
                 src_row,
@@ -149,9 +138,12 @@ def run_one_dataset(
                 target_tok,
                 adj_matrix_hint,
                 use_hint=True,
-                prefetched_hint=(raw_hint, sidecar_time),
+                sidecar_future=sidecar_future,
+                output_memory=mem_ooospec,
             )
 
+            sidecar_time = ooospec_res.get("sidecar_time", 0.0)
+            sidecar_wait = ooospec_res.get("sidecar_wait", 0.0)
             ooospec_total = ooospec_res["wall_time"] + sidecar_wait
 
             record = {
@@ -259,25 +251,20 @@ def main():
     target_model, target_tok = load_target(paths["target_model"], target_device)
     vanilla_model = load_vanilla_target(paths["target_model"], vanilla_device)
 
-    prefetcher = SidecarPrefetcher(SIDECAR_API_URL)
     all_summaries = {}
-    try:
-        for name, src_path, has_gold in datasets:
-            print(f"\n{'='*60}\nBenchmark: {name}\n{'='*60}")
-            src_rows = [json.loads(line) for line in open(src_path, "r", encoding="utf-8")]
-            summary = run_one_dataset(
-                src_rows,
-                base_out / f"{name}_eval_prefetch",
-                has_gold,
-                sidecar_tok,
-                target_model,
-                target_tok,
-                vanilla_model,
-                prefetcher,
-            )
-            all_summaries[name] = summary
-    finally:
-        prefetcher.close()
+    for name, src_path, has_gold in datasets:
+        print(f"\n{'='*60}\nBenchmark: {name}\n{'='*60}")
+        src_rows = [json.loads(line) for line in open(src_path, "r", encoding="utf-8")]
+        summary = run_one_dataset(
+            src_rows,
+            base_out / f"{name}_eval_prefetch",
+            has_gold,
+            sidecar_tok,
+            target_model,
+            target_tok,
+            vanilla_model,
+        )
+        all_summaries[name] = summary
 
     overall_path = base_out / "all_benchmarks_summary.json"
     with open(overall_path, "w", encoding="utf-8") as f:

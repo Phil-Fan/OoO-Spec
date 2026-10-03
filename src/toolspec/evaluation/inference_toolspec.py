@@ -426,6 +426,7 @@ def toolspec_forward(
     output_id_topk=8,
     adj_matrix=None,
     sidecar_hint=None,
+    sidecar_hint_provider=None,
 ):
     input_ids = inputs.input_ids.cuda()
     accept_length_list = []
@@ -505,6 +506,10 @@ def toolspec_forward(
     verify_tool_name = None
     # Cache general-tree structure (independent of token values).
     general_tree_cache = None
+    # Async sidecar hint provider state (polled at candidate-construction rounds).
+    _provider_hint = None
+    _provider_done = sidecar_hint_provider is None
+    _provider_hint_injected = False
     # Cache tool-name tensors on device to avoid repeated cpu().tolist() syncs.
     tool_name_tensors = []
     for tool_name_tuple in schema_fsm.tokenized_schema.keys():
@@ -519,6 +524,25 @@ def toolspec_forward(
         full_input_ids = torch.cat([verify_input_ids, input_ids], dim=-1)
         param_span = full_input_ids[0, -4:].tolist()
 
+        # Non-blocking pickup of the asynchronous sidecar hint: check readiness
+        # at candidate-construction boundaries; never stall the target.
+        if not _provider_done:
+            got = sidecar_hint_provider.poll()
+            if got is not None:
+                _provider_done = True
+                _ptext = got[0] if isinstance(got, (tuple, list)) else got
+                if _ptext:
+                    _pids = tokenizer.encode(_ptext, add_special_tokens=False)
+                    if _pids:
+                        _provider_hint = torch.tensor(
+                            _pids, dtype=torch.long, device=input_ids.device
+                        )
+                        _ctx = _provider_hint.unsqueeze(0)
+                        retrieved_context = (
+                            _ctx if retrieved_context is None
+                            else torch.cat([retrieved_context, _ctx], dim=1)
+                        )
+
         if schema_fsm.state == "init" or schema_fsm.state == "first_param":
             candidate_pred_tokens = schema_fsm.find_candidate_pred_tokens(tool_name=verify_tool_name)
             # Convert list of lists to list of tensors
@@ -529,14 +553,20 @@ def toolspec_forward(
             ]
 
             # Inject out-of-order sidecar hint as an extra candidate path.
+            hint_candidates = []
             if sidecar_hint is not None:
-                if isinstance(sidecar_hint, list):
-                    hint_tensor = torch.tensor(sidecar_hint, dtype=torch.long, device=input_ids.device)
-                elif isinstance(sidecar_hint, torch.Tensor):
-                    hint_tensor = sidecar_hint.to(input_ids.device)
+                hint_candidates.append(sidecar_hint)
+            if _provider_hint is not None and not _provider_hint_injected:
+                hint_candidates.append(_provider_hint)
+            for hint in hint_candidates:
+                if isinstance(hint, torch.Tensor):
+                    candidate_pred_tokens.append(hint.to(input_ids.device))
                 else:
-                    hint_tensor = torch.tensor(sidecar_hint, dtype=torch.long, device=input_ids.device)
-                candidate_pred_tokens.append(hint_tensor)
+                    candidate_pred_tokens.append(
+                        torch.tensor(hint, dtype=torch.long, device=input_ids.device)
+                    )
+            if _provider_hint is not None:
+                _provider_hint_injected = True
 
             # retrieval tree: fill the tree with the found candidate prediction tokens
             input_ids, tree_template, attention_mask, position_ids, search_path, father_index, candi_index, deep_split = build_retrieval_tree_from_candidates(
