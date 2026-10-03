@@ -21,7 +21,7 @@ sys.path.insert(0, str(SRC_ROOT / "toolspec"))
 
 from inference.ooospec_pipeline import (  # noqa: E402
     SIDECAR_API_URL,
-    SidecarPrefetcher,
+    SidecarHintFuture,
     build_sidecar_prompt_text,
     decode_target_output,
     generate_sidecar_hint,
@@ -106,35 +106,18 @@ def main():
 
     src_rows = [r for r in src_rows if r.get("request_id") not in processed_ids]
 
-    prefetcher = SidecarPrefetcher(SIDECAR_API_URL)
+    mem_toolspec = []
+    mem_ooospec = []
     try:
-        # Prime the first hint so sample 0 has something to wait on.
-        if src_rows:
-            first_row = src_rows[0]
-            prefetcher.submit(
-                first_row.get("request_id"),
-                build_sidecar_prompt_text(sidecar_tok, first_row),
-            )
-
         for i, src_row in enumerate(tqdm(src_rows, desc="Evaluating dev", initial=len(records), total=len(src_rows) + len(records))):
             request_id = src_row.get("request_id")
             gold = src_row.get("answer")
             if isinstance(gold, list) and gold:
                 gold = gold[0]
 
-            # Wait for the already-submitted sidecar hint.
-            hint_wait_start = time.time()
-            raw_hint, sidecar_time = prefetcher.get(request_id)
-            sidecar_wait = time.time() - hint_wait_start
-
-            # Immediately schedule the sidecar for the next sample so it runs
-            # concurrently with vanilla / ToolSpec / OoO target on the current sample.
-            if i + 1 < len(src_rows):
-                next_row = src_rows[i + 1]
-                prefetcher.submit(
-                    next_row.get("request_id"),
-                    build_sidecar_prompt_text(sidecar_tok, next_row),
-                )
+            # Launch the asynchronous sidecar job at request arrival; the target
+            # polls it non-blockingly at candidate-construction boundaries.
+            sidecar_future = SidecarHintFuture(sidecar_tok, src_row)
 
             vanilla_res = run_vanilla_sample(src_row, vanilla_model, target_tok)
             toolspec_res = run_toolspec_sample(
@@ -144,6 +127,7 @@ def main():
                 target_tok,
                 adj_matrix_baseline,
                 use_hint=False,
+                output_memory=mem_toolspec,
             )
             ooospec_res = run_toolspec_sample(
                 src_row,
@@ -152,10 +136,13 @@ def main():
                 target_tok,
                 adj_matrix_hint,
                 use_hint=True,
-                prefetched_hint=(raw_hint, sidecar_time),
+                sidecar_future=sidecar_future,
+                output_memory=mem_ooospec,
             )
 
-            # Total OoO latency = target time + any residual wait for the prefetched hint.
+            # Non-blocking pickup: residual wait is ~0; total = target (+ wait).
+            sidecar_time = ooospec_res.get("sidecar_time", 0.0)
+            sidecar_wait = ooospec_res.get("sidecar_wait", 0.0)
             ooospec_total = ooospec_res["wall_time"] + sidecar_wait
 
             record = {
@@ -193,7 +180,7 @@ def main():
             with open(result_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
     finally:
-        prefetcher.close()
+        pass
 
     # Aggregate summary
     def avg(key, subkey):

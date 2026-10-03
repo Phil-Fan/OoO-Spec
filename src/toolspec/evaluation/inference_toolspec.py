@@ -508,6 +508,7 @@ def toolspec_forward(
     general_tree_cache = None
     # Async sidecar hint provider state (polled at candidate-construction rounds).
     _provider_hint = None
+    _provider_direct = None
     _provider_done = sidecar_hint_provider is None
     _provider_hint_injected = False
     # Cache tool-name tensors on device to avoid repeated cpu().tolist() syncs.
@@ -530,18 +531,39 @@ def toolspec_forward(
             got = sidecar_hint_provider.poll()
             if got is not None:
                 _provider_done = True
-                _ptext = got[0] if isinstance(got, (tuple, list)) else got
-                if _ptext:
-                    _pids = tokenizer.encode(_ptext, add_special_tokens=False)
-                    if _pids:
-                        _provider_hint = torch.tensor(
-                            _pids, dtype=torch.long, device=input_ids.device
-                        )
-                        _ctx = _provider_hint.unsqueeze(0)
-                        retrieved_context = (
-                            _ctx if retrieved_context is None
-                            else torch.cat([retrieved_context, _ctx], dim=1)
-                        )
+                _payload = got[0] if isinstance(got, (tuple, list)) and len(got) == 2 else got
+                if isinstance(_payload, list):
+                    _views = _payload
+                elif isinstance(_payload, str):
+                    _views = [_payload]
+                else:
+                    _views = []
+                _encoded = []
+                for _view in _views:
+                    if not _view:
+                        continue
+                    _ids = tokenizer.encode(_view, add_special_tokens=False)
+                    if _ids:
+                        _encoded.append(_ids)
+                if _encoded:
+                    # Build one request-level hint bank: views separated by EOS.
+                    _eos = getattr(tokenizer, "eos_token_id", None)
+                    _bank = []
+                    for _i, _ids in enumerate(_encoded):
+                        if _i > 0 and _eos is not None:
+                            _bank.append(int(_eos))
+                        _bank.extend(_ids)
+                    _provider_hint = torch.tensor(
+                        _bank, dtype=torch.long, device=input_ids.device
+                    )
+                    _provider_direct = torch.tensor(
+                        _encoded[0], dtype=torch.long, device=input_ids.device
+                    )
+                    _ctx = _provider_hint.unsqueeze(0)
+                    retrieved_context = (
+                        _ctx if retrieved_context is None
+                        else torch.cat([retrieved_context, _ctx], dim=1)
+                    )
 
         if schema_fsm.state == "init" or schema_fsm.state == "first_param":
             candidate_pred_tokens = schema_fsm.find_candidate_pred_tokens(tool_name=verify_tool_name)
@@ -557,7 +579,9 @@ def toolspec_forward(
             if sidecar_hint is not None:
                 hint_candidates.append(sidecar_hint)
             if _provider_hint is not None and not _provider_hint_injected:
-                hint_candidates.append(_provider_hint)
+                hint_candidates.append(
+                    _provider_direct if _provider_direct is not None else _provider_hint
+                )
             for hint in hint_candidates:
                 if isinstance(hint, torch.Tensor):
                     candidate_pred_tokens.append(hint.to(input_ids.device))

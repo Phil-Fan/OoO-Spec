@@ -292,6 +292,20 @@ def _render_hint_text(call):
     return json.dumps(call, ensure_ascii=False, separators=(", ", ": "))
 
 
+def _render_call_views(call):
+    """Render one normalized call into equivalent textual views.
+
+    The first view is the target-native spaced JSON (used for direct candidate
+    injection); the extra views broaden the hint bank for suffix matching.
+    """
+    if not call:
+        return []
+    plain = json.dumps(call, ensure_ascii=False, separators=(", ", ": "))
+    markdown = f"```json\n{plain}\n```"
+    xml = f"<tool_call>\n{plain}\n</tool_call>"
+    return [plain, markdown, xml]
+
+
 class SidecarHintFuture:
     """Within-request asynchronous sidecar job (paper-style parallel slot wave).
 
@@ -303,6 +317,7 @@ class SidecarHintFuture:
     def __init__(self, sidecar_tok, src_row, api_url=SIDECAR_API_URL, max_workers=16):
         self._ready = threading.Event()
         self._text = None
+        self._views = []
         self._elapsed = 0.0
         self._exc = None
         self._consumed = False
@@ -345,7 +360,8 @@ class SidecarHintFuture:
                     if ok and value is not None:
                         arg_values[p_name] = value
             call = _join_normalized_call(schemas, fn_idx, arg_values)
-            self._text = _render_hint_text(call)
+            self._views = _render_call_views(call)
+            self._text = self._views[0] if self._views else None
             self._elapsed = time.time() - start
         except Exception as exc:  # noqa: BLE001
             self._exc = exc
@@ -353,13 +369,13 @@ class SidecarHintFuture:
             self._ready.set()
 
     def poll(self):
-        """Non-blocking pickup; returns ``(text, elapsed)`` once, else ``None``."""
+        """Non-blocking pickup; returns ``(views, elapsed)`` once, else ``None``."""
         if not self._ready.is_set() or self._consumed:
             return None
         self._consumed = True
         if self._exc is not None:
             return None
-        return (self._text, self._elapsed)
+        return (self._views, self._elapsed)
 
     @property
     def elapsed(self) -> float:
@@ -369,7 +385,7 @@ class SidecarHintFuture:
         self._ready.wait(timeout)
         if self._exc is not None:
             raise self._exc
-        return (self._text, self._elapsed)
+        return (self._views, self._elapsed)
 
 
 def load_sidecar_tokenizer(base_path: str):
